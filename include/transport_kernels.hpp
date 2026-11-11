@@ -9,6 +9,8 @@
 
 namespace rr_benchmark {
 
+constexpr int64_t kMaxEnergyGroups = 256;
+
 // ============================================================================
 // Algorithm 1: Loop Reordering in Local Flux Attenuation
 // ============================================================================
@@ -41,6 +43,20 @@ void attenuate_moment_major(
 
 // (c) Group-major order with separate vector flux update (loop-order control)
 void attenuate_group_major_separate_update(
+    int64_t G,
+    int64_t Nmom,
+    const double* __restrict__ q_tilde,
+    const double* __restrict__ sigma_t,
+    const double* __restrict__ R,
+    double length,
+    const double* __restrict__ psi_in,
+    double* __restrict__ psi_out,
+    double* __restrict__ delta_psi
+);
+
+// (d) Moment-major control: no explicit SIMD in the source sum, matching (c).
+// Attenuation kernels require 1 <= G <= kMaxEnergyGroups and Nmom >= 1.
+void attenuate_moment_major_control(
     int64_t G,
     int64_t Nmom,
     const double* __restrict__ q_tilde,

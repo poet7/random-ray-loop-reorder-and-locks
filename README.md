@@ -1,157 +1,151 @@
-# Multigroup Random-Ray Transport Optimization Benchmark
-### Loop Reordering and Lock-Based Synchronization
+# Multigroup Random-Ray Transport Benchmark Kernels
 
-[![Release](https://img.shields.io/badge/release-v1.0.0-blue.svg)](https://github.com/poet7/random-ray-loop-reorder-and-locks/releases/tag/v1.0.0)
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)]()
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
-[![OpenMP](https://img.shields.io/badge/Parallel-OpenMP-green.svg)](https://www.openmp.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-This repository provides standalone C++ benchmark kernels for the loop-reordering (Algorithm 1) and lock-synchronization (Algorithm 2) methods described in:
+Standalone C++ examples accompanying the unpublished manuscript:
 
-> **"Loop reordering and lock-based synchronization in multigroup random-ray transport"**  
-> Shihong Li, Shuai Qin, Xiangchun Tian, Jiacheng Li, Qian Zhang*  
-> *School of Physics, Zhejiang University*  
-> Submitted to *Computer Physics Communications*.
+> **Loop reordering and lock-based synchronization in multigroup random-ray transport**
+>
+> Shihong Li, Shuai Qin, Xiangchun Tian, Jiacheng Li, Qian Zhang
+>
+> School of Physics, Zhejiang University
 
-These standalone kernels isolate and verify the core computational algorithms without proprietary reactor geometry or cross-section dependencies. Full-core performance results and scaling analyses in the paper were obtained using the THETA transport code.
+These examples demonstrate local flux attenuation and regional accumulation
+using synthetic inputs. They are not the THETA solver or a reproduction
+package for the PCA-Replica, Iron-88, and Savannah results. Those results use
+the full transport code, model inputs, cross-section data, and archived run
+settings described in the manuscript. Timings from these examples are not
+the paper's transport times or speedups.
 
-The code version corresponding to the manuscript submission is tagged as [`v1.0.0`](https://github.com/poet7/random-ray-loop-reorder-and-locks/releases/tag/v1.0.0).
+The original [`v1.0.0`](https://github.com/poet7/random-ray-loop-reorder-and-locks/tree/v1.0.0)
+snapshot is retained unchanged. Use the current `main` branch for the matched
+loop-order control, input validation, and threshold-based checks below.
 
----
+## Local flux attenuation
 
-## Core Algorithms
+Each kernel evaluates the directional source from angular-moment coefficients
+and uses it to advance the angular flux across one segment. The coefficient
+layout is `[moment][group]`, with energy groups contiguous.
+All variants use `-expm1(-tau)` to evaluate the attenuation factor
+`1 - exp(-tau)` accurately for small optical thicknesses.
 
-### 1. Loop Reordering in Local Flux Attenuation (Algorithm 1)
-Under the flat-source approximation, each ray segment crossing requires evaluating directional sources from moment expansions and updating multigroup angular fluxes:
-- **(a) Group-Major Order**: Outer loop over energy groups $g$, performing scalar source reductions across angular moments $a$. Suffers from strided memory accesses and lack of SIMD vectorization.
-- **(b) Moment-Major Order**: Outer loop over angular moments $a$, updating contiguous group vectors with explicit SIMD vectorization, followed by a separate vector flux update.
-- **(c) Group-Major Control**: Isolates loop order effects with identical temporary vector storage and separate flux update code.
+| Variant | Source-summation order | Explicit SIMD in source sum | Temporary source vector | Flux update |
+| --- | --- | --- | --- | --- |
+| (a) `attenuate_group_major` | Group, then moment | No | No | Immediately after each group sum |
+| (b) `attenuate_moment_major` | Moment, then group | Yes | Yes | Separate group loop |
+| (c) `attenuate_group_major_separate_update` | Group, then moment | No | Yes | Separate group loop |
+| (d) `attenuate_moment_major_control` | Moment, then group | No | Yes | Separate group loop |
 
-### 2. Lock-Based Synchronization in Shared Regional Accumulation (Algorithm 2)
-Concurrent OpenMP threads accumulate active ray segment flux changes $\Delta\psi_g$ into shared regional angular-moment tallies $C_{i,a,g}$:
-- **Native OpenMP Locks (`omp_lock_t`)**: Standard OS-scheduled mutex with thread suspension.
-- **Cache-Padded Spinlocks (`PaddedSpinLock`)**: Padded to 64 bytes (`alignas(64)`) to eliminate false sharing, spinning on atomic state.
-- **MCS Queue Locks (`MCSLock`)**: Scalable queue lock (Mellor-Crummey and Scott) where each waiting thread spins strictly on a thread-private cache line, passing ownership via direct successor signaling.
+The program reports two different comparisons:
 
----
+- **Complete implementations, (a) versus (b):** illustrates the organization
+  used in the PCA-Replica comparison, including explicit SIMD, temporary
+  storage, and a separate flux update.
+- **Controlled loop order, (c) versus (d):** both source sums omit explicit
+  SIMD directives, both use the same aligned temporary storage, and both
+  call the same flux-update function with an explicit SIMD directive. Only
+  the source-summation loop nesting differs, matching the control used for
+  Iron-88. The compiler may still automatically vectorize either source sum.
 
-## Quick Start
+Local attenuation timings are single-threaded. `--threads` sets the worker
+count for the regional accumulation tests, not the local projection tests.
 
-### Prerequisites
-- Modern C++ compiler supporting C++17 (e.g., GCC >= 9.4, Clang >= 11, or MSVC)
-- CMake >= 3.14
-- OpenMP and POSIX Threads (`pthreads`)
+## Regional accumulation
 
-### Build Instructions
+Workers add segment contributions to shared regional angular-moment tallies.
+The protected accumulation is the same for three lock implementations:
+
+- **Native OpenMP lock:** uses `omp_lock_t` with no additional padding.
+  Its waiting behavior depends on the OpenMP runtime and its settings.
+- **Conventional spinlock:** uses POSIX `pthread_spinlock_t` in a
+  64-byte-aligned object.
+- **MCS queue lock:** uses a 64-byte-aligned lock object. Each worker waits
+  on its own queue node and receives ownership from its predecessor.
+
+The synthetic tests use 141 and 1410 target regions with uniformly sampled
+requests. They do not trace rays through a geometry or reproduce the
+spatial and temporal request patterns in the Savannah calculations.
+Results compare these specific lock implementations, including their
+different object layouts.
+
+## Build and test
+
+Requires Linux (including WSL), a C++17 compiler such as GCC 9.4 or newer,
+CMake 3.14 or newer, OpenMP, and POSIX threads. Native MSVC builds are not
+supported because the spinlock uses the POSIX API.
+
 ```bash
 git clone https://github.com/poet7/random-ray-loop-reorder-and-locks.git
 cd random-ray-loop-reorder-and-locks
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-```
-
-### Run Tests and Benchmarks
-To run the automated smoke test (quick verification in ~0.2 s):
-```bash
 cd build
 ctest --output-on-failure
-# Or directly via CLI:
-./rr_benchmark --smoke
 ```
 
-To run the full multi-threaded performance benchmark:
+From the build directory, run a short numerical check or the full synthetic
+benchmark:
+
 ```bash
-./rr_benchmark
+./rr_benchmark --smoke --threads 2
+./rr_benchmark --threads 8
 ```
 
-### Command-Line Options
-```text
-Usage: ./rr_benchmark [options]
-Options:
-  --smoke              Run a fast smoke test (for quick verification and CI)
-  --threads <N>        Set number of OpenMP worker threads (default: hardware max)
-  --groups <G>         Set number of energy groups (default: 47)
-  --moments <M>        Set number of spherical harmonics moments (default: 16 for P3)
-  --segments <S>       Set number of segments for lock contention test (default: 2000000)
-  --trials <T>         Set number of trials for local attenuation test (default: 5000000)
-  -h, --help           Display usage message
-```
+The default full run uses five million local trials and two million regional
+requests per mesh. It performs one timing of each variant; it does not
+estimate confidence intervals. Smoke mode uses 1024 local trials, 4096
+regional requests per mesh, and at most four workers unless explicitly set.
+Smoke timings are for functional checks, not performance conclusions.
 
----
+### Command-line options
 
-## Representative Output
-```text
-======================================================================
-  Multigroup Random-Ray Transport Optimization Benchmark
-  Kernels: Loop Reordering (Alg. 1) & Lock Synchronization (Alg. 2)
-======================================================================
-Configuration:
-  Energy Groups (G):       47
-  Angular Moments (Nmom):  16 (P3 expansion)
-  Attenuation Trials:      5000000
-  Lock Benchmark Segments: 2000000
-  OpenMP Threads:          32
-----------------------------------------------------------------------
+| Option | Meaning | Default |
+| --- | --- | --- |
+| `--smoke` | Use the short functional-check workload | Off |
+| `--threads N` | Positive number of OpenMP workers | OpenMP maximum, or at most four in smoke mode |
+| `--groups G` | Energy groups; `1 <= G <= 256` | 47 |
+| `--moments M` | Positive number of angular moments | 16 |
+| `--segments S` | Positive request count per regional test | 2000000, or 4096 in smoke mode |
+| `--trials T` | Positive trial count per local kernel | 5000000, or 1024 in smoke mode |
+| `--help` | Print usage | |
 
---- [Part 1] Loop Reordering in Local Flux Attenuation (Alg. 1) ---
-  (a) Group-major time:            1769.460 ms  (baseline)
-  (b) Moment-major time (SIMD):    1206.899 ms  [Speedup: 1.466x]
-  (c) Group-major separate update: 2476.479 ms  [Speedup: 0.715x]
-  Numerical difference epsilon_2 (Moment vs Group):   1.091e-16
-  Numerical difference epsilon_2 (Control vs Group):  0.000e+00
+Explicit workload options override smoke defaults regardless of their order.
+The fixed-size source workspace supports at most 256 groups. Invalid,
+out-of-range, missing, or overflowing integer arguments are rejected before
+kernel execution. The attenuation entry points also check group and moment
+counts, including when called directly.
 
---- [Part 2] Regional Lock Synchronization (Alg. 2, Threads: 32) ---
-  Scenario: Coarse Mesh / High Contention (Nreg = 141)
-    OpenMP Lock: 323.370 ms  (baseline)
-    SpinLock:    322.009 ms  [Speedup vs OMP: 1.004x]
-    MCS Lock:    340.839 ms  [Speedup vs OMP: 0.949x]
-    Numerical diff (Spin vs OMP): 0.000
-    Numerical diff (MCS  vs OMP): 0.000
+## Numerical verification
 
-  Scenario: Fine Mesh / Low Contention (Nreg = 1410)
-    OpenMP Lock: 319.862 ms  (baseline)
-    SpinLock:    328.815 ms  [Speedup vs OMP: 0.973x]
-    MCS Lock:    342.380 ms  [Speedup vs OMP: 0.934x]
-    Numerical diff (Spin vs OMP): 0.000
-    Numerical diff (MCS  vs OMP): 0.000
+Both outgoing angular fluxes and angular-flux changes are compared between
+the local variants. Regional tallies are compared with one another and with
+an independent reference formed from the number of requests to each region
+and the known per-request contribution.
 
-======================================================================
-  Verification Status: ALL TESTS PASSED
-======================================================================
-```
+Every comparison must satisfy both a relative L2 difference and a
+reference-maximum-normalized absolute difference of at most `1e-8`.
+Nonfinite values fail. An all-zero reference passes only when the test is
+also zero. A failed comparison produces `[FAIL]` and a nonzero exit status;
+`ALL CHECKS PASSED` is printed only if every comparison passes.
 
----
+CTest covers the attenuation formulas for 1, 47, and 256 groups with
+1, 4, and 16 moments, zero and short segments, invalid command-line inputs,
+and the error checker itself, including out-of-tolerance, zero-reference,
+NaN, and infinity cases. Checks run outside the benchmark's timed intervals.
 
-## Repository Layout
-```text
-random-ray-loop-reorder-and-locks/
-├── CMakeLists.txt          # Portable CMake build configuration with CTest
-├── README.md               # Documentation and reproducibility guide
-├── LICENSE                 # MIT License
-├── include/
-│   ├── locks.hpp           # PaddedSpinLock, MCSLock, and OMPLock implementations
-│   └── transport_kernels.hpp # Algorithm 1 and Algorithm 2 declarations
-└── src/
-    ├── transport_kernels.cpp # Core computational kernel implementations
-    └── main.cpp            # Benchmark harness with verification and CLI options
-```
+## Manuscript citation
 
----
+The manuscript is unpublished. No journal or DOI is assigned here.
 
-## Citation
-If you use these benchmark kernels or algorithms in your research, please cite our paper:
 ```bibtex
-@article{li2026loopreordering,
+@unpublished{li2026loopreordering,
   title={Loop reordering and lock-based synchronization in multigroup random-ray transport},
   author={Li, Shihong and Qin, Shuai and Tian, Xiangchun and Li, Jiacheng and Zhang, Qian},
-  journal={Computer Physics Communications},
+  note={Unpublished manuscript},
   year={2026}
 }
 ```
 
----
-
 ## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+[MIT](LICENSE).
